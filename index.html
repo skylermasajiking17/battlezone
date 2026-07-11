@@ -2,12 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
 <title>BATTLEZONE</title>
 <style>
   html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden;
-            font-family:"Courier New",monospace;color:#3bff5e;}
+            font-family:"Courier New",monospace;color:#3bff5e;
+            touch-action:none;-webkit-user-select:none;user-select:none;
+            -webkit-tap-highlight-color:transparent;overscroll-behavior:none;}
   #wrap{display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;}
-  canvas{background:#000;border:2px solid #111;image-rendering:pixelated;}
+  canvas{background:#000;display:block;touch-action:none;}
   #help{margin-top:8px;font-size:12px;letter-spacing:2px;color:#2a7a3c;}
 </style>
 </head>
@@ -446,6 +450,123 @@ function down(){
   return false;
 }
 
+/* ---------- touch input ---------- */
+var IS_TOUCH = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+var STICK_R  = 78;
+var FIRE_BTN = { x: W - 150, y: H - 140, r: 78 };
+
+var tj    = { id:null, bx:0, by:0, x:0, y:0, on:false };   // virtual thumbstick
+var tfire = { id:null, on:false };
+
+function toCanvas(e){
+  var r = cv.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width,
+           y: (e.clientY - r.top)  * H / r.height };
+}
+function onDown(e){
+  e.preventDefault();
+  sfx.unlock();
+  var p = toCanvas(e);
+
+  if (mode === "attract" || mode === "over"){ resetGame(); mode = "play"; return; }
+
+  var dx = p.x - FIRE_BTN.x, dy = p.y - FIRE_BTN.y;
+  if (dx*dx + dy*dy < (FIRE_BTN.r*1.35)*(FIRE_BTN.r*1.35)){
+    tfire.id = e.pointerId; tfire.on = true;
+    return;
+  }
+  if (p.x < W*0.55 && tj.id === null){
+    tj.id = e.pointerId;
+    tj.bx = p.x; tj.by = p.y; tj.x = p.x; tj.y = p.y; tj.on = true;
+  }
+}
+function onMove(e){
+  if (e.pointerId !== tj.id) return;
+  e.preventDefault();
+  var p = toCanvas(e);
+  tj.x = p.x; tj.y = p.y;
+}
+function onUp(e){
+  if (e.pointerId === tj.id){ tj.id = null; tj.on = false; }
+  if (e.pointerId === tfire.id){ tfire.id = null; tfire.on = false; }
+}
+cv.addEventListener("pointerdown", onDown);
+cv.addEventListener("pointermove", onMove);
+cv.addEventListener("pointerup", onUp);
+cv.addEventListener("pointercancel", onUp);
+cv.addEventListener("contextmenu", function(e){ e.preventDefault(); });
+
+/* stick -> the same move/turn the keyboard produces */
+function stickAxes(){
+  if (!tj.on) return { move:0, turn:0 };
+  var dx = (tj.x - tj.bx) / STICK_R;
+  var dy = (tj.by - tj.y) / STICK_R;
+  return { move: Math.max(-1, Math.min(1, dy)),
+           turn: Math.max(-1, Math.min(1, dx)) };
+}
+
+function drawTouchControls(){
+  if (!IS_TOUCH || mode !== "play") return;
+
+  // thumbstick - only visible while a thumb is on it
+  if (tj.on){
+    var ax = stickAxes();
+    ctx.strokeStyle = DIM; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(tj.bx, tj.by, STICK_R, 0, Math.PI*2); ctx.stroke();
+    ctx.strokeStyle = GREEN; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(tj.bx + ax.turn*STICK_R, tj.by - ax.move*STICK_R, 26, 0, Math.PI*2);
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = "#145123"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(160, H-140, STICK_R, 0, Math.PI*2); ctx.stroke();
+    ctx.fillStyle = "#145123";
+    ctx.font = "bold 15px 'Courier New',monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("DRIVE", 160, H-135);
+    ctx.textAlign = "left";
+  }
+
+  // fire button
+  ctx.strokeStyle = (S.cool > 0) ? DIM : RED;
+  ctx.lineWidth = tfire.on ? 5 : 3;
+  ctx.beginPath(); ctx.arc(FIRE_BTN.x, FIRE_BTN.y, FIRE_BTN.r, 0, Math.PI*2); ctx.stroke();
+  ctx.fillStyle = (S.cool > 0) ? DIM : RED;
+  ctx.font = "bold 20px 'Courier New',monospace";
+  ctx.textAlign = "center";
+  ctx.fillText("FIRE", FIRE_BTN.x, FIRE_BTN.y + 7);
+  ctx.textAlign = "left";
+  ctx.lineWidth = 2;
+}
+
+/* ---------- responsive layout ---------- */
+function layout(){
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var pad = IS_TOUCH ? 0 : 24;
+  var sc = Math.min((vw - pad) / W, (vh - pad - (IS_TOUCH ? 0 : 28)) / H);
+  cv.style.width  = (W * sc) + "px";
+  cv.style.height = (H * sc) + "px";
+  var help = document.getElementById("help");
+  if (help) help.style.display = IS_TOUCH ? "none" : "block";
+}
+window.addEventListener("resize", layout);
+window.addEventListener("orientationchange", function(){ setTimeout(layout, 200); });
+
+function drawRotatePrompt(){
+  if (!IS_TOUCH) return false;
+  if (window.innerHeight <= window.innerWidth) return false;
+  ctx.fillStyle = "#000"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = GREEN;
+  ctx.textAlign = "center";
+  ctx.font = "bold 40px 'Courier New',monospace";
+  ctx.fillText("ROTATE YOUR DEVICE", CX, CY - 10);
+  ctx.font = "20px 'Courier New',monospace";
+  ctx.fillStyle = DIM;
+  ctx.fillText("BATTLEZONE NEEDS A WIDE SCREEN", CX, CY + 34);
+  ctx.textAlign = "left";
+  return true;
+}
+
 /* ---------- player ---------- */
 function updatePlayer(dt){
   if (S.dead > 0){
@@ -466,6 +587,11 @@ function updatePlayer(dt){
   if (down("ArrowUp","KeyW"))    move += 1;
   if (down("ArrowDown","KeyS"))  move -= 1;
 
+  // thumbstick adds to the same axes
+  var ax = stickAxes();
+  turn = Math.max(-1, Math.min(1, turn + ax.turn));
+  move = Math.max(-1, Math.min(1, move + ax.move));
+
   cam.a += turn * 1.45 * dt;
 
   var spd = move > 0 ? 15 : 8;
@@ -473,7 +599,7 @@ function updatePlayer(dt){
   var nz = cam.z + Math.cos(cam.a)*move*spd*dt;
   if (!hitsObstacle(nx, nz, 2.4)){ cam.x = nx; cam.z = nz; }
 
-  if (keys["Space"]) fire();     // hold the trigger to keep firing
+  if (keys["Space"] || tfire.on) fire();     // hold the trigger to keep firing
 
   sfx.engine(Math.abs(move), Math.abs(turn));
 }
@@ -764,7 +890,7 @@ function drawOverlayText(){
 
     ctx.fillStyle = GREEN;
     ctx.font = "bold 22px 'Courier New',monospace";
-    ctx.fillText("PRESS SPACE TO START", CX, 490);
+    ctx.fillText(IS_TOUCH ? "TAP TO START" : "PRESS SPACE TO START", CX, 490);
     ctx.fillStyle = DIM;
     ctx.font = "16px 'Courier New',monospace";
     ctx.fillText("BONUS TANK EVERY 15000", CX, 530);
@@ -774,7 +900,7 @@ function drawOverlayText(){
     ctx.fillText("GAME OVER", CX, CY - 30);
     ctx.font = "bold 22px 'Courier New',monospace";
     ctx.fillText("SCORE " + S.score, CX, CY + 20);
-    ctx.fillText("PRESS SPACE", CX, CY + 60);
+    ctx.fillText(IS_TOUCH ? "TAP TO PLAY AGAIN" : "PRESS SPACE", CX, CY + 60);
   }
   ctx.textAlign = "left";
 }
@@ -841,12 +967,15 @@ var sfx = (function(){
 /* ---------- main loop ---------- */
 var last = performance.now();
 resetGame();
+layout();
 
 function frame(now){
   var dt = Math.min(0.05, (now - last)/1000);
   last = now;
   sweep += dt * 2.2;
   if (sweep > Math.PI*2) sweep -= Math.PI*2;
+
+  if (drawRotatePrompt()){ requestAnimationFrame(frame); return; }
 
   if (mode === "play" && !paused){
     updatePlayer(dt);
@@ -859,6 +988,7 @@ function frame(now){
   }
 
   render();
+  drawTouchControls();
   if (mode !== "play") drawOverlayText();
   requestAnimationFrame(frame);
 }
