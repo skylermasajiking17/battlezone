@@ -4,7 +4,7 @@ A wireframe vector tank game in a single HTML file. No libraries, no build step,
 
 An homage to Atari's 1980 arcade cabinet *Battlezone*. Written from scratch as a personal project.
 
-**[▶ Play it](https://YOUR-USERNAME.github.io/battlezone/)**
+**[▶ Play it](https://skyking0-masaji.github.io/battlezone/)**
 
 ## Controls
 
