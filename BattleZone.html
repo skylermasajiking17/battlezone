@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BATTLEZONE</title>
+<style>
+  html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden;
+            font-family:"Courier New",monospace;color:#3bff5e;}
+  #wrap{display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;}
+  canvas{background:#000;border:2px solid #111;image-rendering:pixelated;}
+  #help{margin-top:8px;font-size:12px;letter-spacing:2px;color:#2a7a3c;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="screen" width="960" height="720"></canvas>
+  <div id="help">ARROWS / WASD = DRIVE &nbsp;&nbsp; SPACE = FIRE &nbsp;&nbsp; P = PAUSE</div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ============================================================
+   BATTLEZONE  -  vector wireframe tank combat
+   ============================================================ */
+
+var cv  = document.getElementById("screen");
+var ctx = cv.getContext("2d");
+var W = cv.width, H = cv.height;
+
+var GREEN = "#3bff5e";
+var DIM   = "#1c8a33";
+var RED   = "#ff3b30";
+
+/* ---------- camera / projection ---------- */
+var FOV    = 70 * Math.PI/180;
+var FOCAL  = (W/2) / Math.tan(FOV/2);
+var NEARZ  = 0.6;
+var EYE    = 1.9;          // eye height above ground
+var CX     = W/2;
+var CY     = H*0.50;       // horizon line = vanishing point of the ground
+var VIEW   = 170;          // draw distance
+var WORLD  = 420;          // world wraps -> feels endless
+
+var cam = { x:0, z:0, a:0 };
+
+function wrap(d){
+  d = d % WORLD;
+  if (d >  WORLD/2) d -= WORLD;
+  if (d < -WORLD/2) d += WORLD;
+  return d;
+}
+function toCam(x,y,z){
+  var dx = wrap(x - cam.x), dz = wrap(z - cam.z);
+  var s = Math.sin(cam.a), c = Math.cos(cam.a);
+  return { x: dx*c - dz*s, y: y - EYE, z: dx*s + dz*c };
+}
+function proj(p){
+  return { x: CX + p.x*FOCAL/p.z, y: CY - p.y*FOCAL/p.z };
+}
+function line3(A,B){
+  if (A.z < NEARZ && B.z < NEARZ) return;
+  if (A.z < NEARZ){
+    var t = (NEARZ - A.z)/(B.z - A.z);
+    A = { x:A.x+(B.x-A.x)*t, y:A.y+(B.y-A.y)*t, z:NEARZ };
+  } else if (B.z < NEARZ){
+    var u = (NEARZ - B.z)/(A.z - B.z);
+    B = { x:B.x+(A.x-B.x)*u, y:B.y+(A.y-B.y)*u, z:NEARZ };
+  }
+  var p = proj(A), q = proj(B);
+  ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y);
+}
+function dist2(x,z){ var dx=wrap(x-cam.x), dz=wrap(z-cam.z); return dx*dx+dz*dz; }
+
+/* ---------- wireframe models ---------- */
+function box(w,h,d,y0){
+  var hw=w/2, hd=d/2, y1=y0+h;
+  return { v:[[-hw,y0,-hd],[hw,y0,-hd],[hw,y0,hd],[-hw,y0,hd],
+              [-hw,y1,-hd],[hw,y1,-hd],[hw,y1,hd],[-hw,y1,hd]],
+           e:[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]] };
+}
+function pyramid(w,h){
+  var hw=w/2;
+  return { v:[[-hw,0,-hw],[hw,0,-hw],[hw,0,hw],[-hw,0,hw],[0,h,0]],
+           e:[[0,1],[1,2],[2,3],[3,0],[0,4],[1,4],[2,4],[3,4]] };
+}
+function merge(){
+  var v=[], e=[];
+  for (var i=0;i<arguments.length;i++){
+    var m=arguments[i], off=v.length;
+    for (var a=0;a<m.v.length;a++) v.push(m.v[a]);
+    for (var b=0;b<m.e.length;b++) e.push([m.e[b][0]+off, m.e[b][1]+off]);
+  }
+  return {v:v,e:e};
+}
+
+var M_CUBE   = box(5,5,5,0);
+var M_BLOCK  = box(4,9,4,0);
+var M_PYR    = pyramid(6,7);
+
+var M_TANK = merge(
+  box(4.0,0.6,5.0,0.0),            // treads / skirt
+  box(3.2,1.1,4.2,0.6),            // hull
+  box(1.8,0.8,2.0,1.7),            // turret
+  { v:[[0,2.15,1.0],[0,2.15,4.0],[0.25,2.15,4.0],[-0.25,2.15,4.0],[0,2.4,4.0],[0,1.9,4.0]],
+    e:[[0,1],[2,3],[4,5]] }        // gun barrel + muzzle
+);
+
+var M_MISSILE = {
+  v:[[0,0,3.2],[0.8,0,-1.0],[-0.8,0,-1.0],[0,0.8,-1.0],[0,-0.8,-1.0],
+     [0,0,-2.4],[2.0,0,-2.8],[-2.0,0,-2.8]],
+  e:[[0,1],[0,2],[0,3],[0,4],[1,3],[3,2],[2,4],[4,1],
+     [1,5],[2,5],[3,5],[4,5],[5,6],[1,6],[5,7],[2,7]]
+};
+
+var M_SAUCER = (function(){
+  var v=[], e=[], n=8, i, t;
+  for (i=0;i<n;i++){ t=i/n*Math.PI*2; v.push([Math.cos(t)*3.0, 0, Math.sin(t)*3.0]); }
+  for (i=0;i<n;i++){ t=i/n*Math.PI*2; v.push([Math.cos(t)*1.3, 1.3, Math.sin(t)*1.3]); }
+  v.push([0,-1.4,0]);
+  for (i=0;i<n;i++){
+    e.push([i,(i+1)%n]);
+    e.push([n+i, n+((i+1)%n)]);
+    e.push([i, n+i]);
+    e.push([i, 2*n]);
+  }
+  return {v:v,e:e};
+})();
+
+var M_SHELL = {
+  v:[[0,0.4,0],[0,-0.4,0],[0.4,0,0],[-0.4,0,0],[0,0,0.4],[0,0,-0.4]],
+  e:[[0,2],[2,1],[1,3],[3,0],[0,4],[4,1],[1,5],[5,0],[2,4],[4,3],[3,5],[5,2]]
+};
+
+function drawModel(m, ox,oy,oz, rot, sc){
+  sc = sc || 1;
+  var s = Math.sin(rot), c = Math.cos(rot), pts = [], i, v;
+  for (i=0;i<m.v.length;i++){
+    v = m.v[i];
+    var x = (v[0]*c + v[2]*s)*sc;
+    var z = (-v[0]*s + v[2]*c)*sc;
+    pts.push(toCam(ox+x, oy+v[1]*sc, oz+z));
+  }
+  for (i=0;i<m.e.length;i++) line3(pts[m.e[i][0]], pts[m.e[i][1]]);
+}
+
+/* ---------- horizon: mountains, volcano, moon ---------- */
+var skyline = (function(){
+  var pts=[], n=90, seed=12345;
+  function rnd(){ seed = (seed*1103515245 + 12345) & 0x7fffffff; return seed/0x7fffffff; }
+  for (var i=0;i<=n;i++){
+    var a = i/n * Math.PI*2;
+    var h = 12 + rnd()*46;
+    if (i%3===0) h += rnd()*30;
+    pts.push([a, h]);
+  }
+  pts[n][1] = pts[0][1];
+  return pts;
+})();
+var VOLC_A = 2.35;
+
+function skyX(rel){
+  while (rel >  Math.PI) rel -= Math.PI*2;
+  while (rel < -Math.PI) rel += Math.PI*2;
+  var r = Math.max(-0.95, Math.min(0.95, rel));
+  return { x: CX + Math.tan(r)*FOCAL, off: Math.abs(rel) > 0.95 };
+}
+function drawHorizon(){
+  ctx.strokeStyle = DIM; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, CY); ctx.lineTo(W, CY); ctx.stroke();
+
+  ctx.strokeStyle = GREEN; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var i=0;i<skyline.length-1;i++){
+    var r1 = skyline[i][0] - cam.a, r2 = skyline[i+1][0] - cam.a;
+    var a = skyX(r1), b = skyX(r2);
+    if (a.off && b.off) continue;
+    ctx.moveTo(a.x, CY - skyline[i][1]);
+    ctx.lineTo(b.x, CY - skyline[i+1][1]);
+  }
+  // volcano
+  var vc = skyX(VOLC_A - cam.a - 0.16),
+      vp = skyX(VOLC_A - cam.a),
+      vr = skyX(VOLC_A - cam.a + 0.16);
+  if (!(vc.off && vr.off)){
+    ctx.moveTo(vc.x, CY);      ctx.lineTo(vp.x - 26, CY - 118);
+    ctx.moveTo(vp.x - 26, CY - 118); ctx.lineTo(vp.x + 26, CY - 118);
+    ctx.moveTo(vp.x + 26, CY - 118); ctx.lineTo(vr.x, CY);
+    ctx.moveTo(vp.x - 14, CY - 118); ctx.lineTo(vp.x - 4, CY - 138);
+    ctx.moveTo(vp.x + 12, CY - 118); ctx.lineTo(vp.x + 2, CY - 144);
+  }
+  ctx.stroke();
+
+  // crescent moon
+  var mo = skyX(5.30 - cam.a);
+  if (!mo.off){
+    ctx.strokeStyle = DIM; ctx.beginPath();
+    ctx.arc(mo.x, CY - 210, 22, 0, Math.PI*2); ctx.stroke();
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(mo.x + 11, CY - 216, 20, 0, Math.PI*2); ctx.stroke();
+    ctx.lineWidth = 2;
+  }
+}
+
+/* ---------- world objects ---------- */
+var obstacles = [];
+function buildWorld(){
+  obstacles = [];
+  for (var i=0;i<44;i++){
+    var t = Math.random();
+    var o = { x:(Math.random()-0.5)*WORLD, z:(Math.random()-0.5)*WORLD,
+              rot:Math.random()*Math.PI*2 };
+    if (t < 0.4){ o.m = M_CUBE;  o.r = 4.2; }
+    else if (t < 0.7){ o.m = M_PYR; o.r = 4.6; }
+    else { o.m = M_BLOCK; o.r = 3.6; }
+    if (o.x*o.x + o.z*o.z < 300) continue;   // keep spawn area clear
+    obstacles.push(o);
+  }
+}
+function hitsObstacle(x,z,rad){
+  for (var i=0;i<obstacles.length;i++){
+    var o = obstacles[i];
+    var dx = wrap(o.x - x), dz = wrap(o.z - z);
+    var rr = o.r + rad;
+    if (dx*dx + dz*dz < rr*rr) return true;
+  }
+  return false;
+}
+
+/* ---------- game state ---------- */
+var S = {};
+function resetGame(){
+  S.score = 0; S.lives = 3; S.next = 15000;
+  S.enemy = null; S.saucer = null; S.spawnT = 1.2;
+  S.shots = []; S.eshots = []; S.booms = [];
+  S.kills = 0; S.dead = 0; S.cracks = null; S.invuln = 0;
+  S.cool = 0; S.shake = 0;
+  cam.x = 0; cam.z = 0; cam.a = 0;
+  buildWorld();
+}
+var high = 0;
+var mode = "attract";   // attract | play | over
+var paused = false;
+
+/* ---------- enemies ---------- */
+function spawnEnemy(){
+  var ang = cam.a + (Math.random()-0.5)*2.4 + (Math.random()<0.35 ? Math.PI : 0);
+  var d = 48 + Math.random()*32;
+  var x = cam.x + Math.sin(ang)*d;
+  var z = cam.z + Math.cos(ang)*d;
+  var roll = Math.random();
+  var lvl = Math.min(6, Math.floor(S.kills/3));
+  var e;
+  if (roll < 0.18 + lvl*0.03){
+    e = { kind:"missile", x:x, y:2.6, z:z, a:ang+Math.PI, spd:26, hp:1, pts:2000, fire:99 };
+  } else if (roll < 0.34 + lvl*0.05){
+    e = { kind:"super", x:x, y:0, z:z, a:ang+Math.PI, spd:15, turn:1.5, hp:1, pts:3000,
+          fire:1.4 + Math.random(), acc:0.05 };
+  } else {
+    e = { kind:"tank", x:x, y:0, z:z, a:ang+Math.PI, spd:8.5, turn:0.9, hp:1, pts:1000,
+          fire:2.0 + Math.random()*1.5, acc:0.09 };
+  }
+  S.enemy = e;
+  if (e.kind === "missile") sfx.rise();
+}
+function updateEnemy(dt){
+  if (!S.enemy){
+    S.spawnT -= dt;
+    if (S.spawnT <= 0) spawnEnemy();
+    return;
+  }
+  var e = S.enemy;
+  var dx = wrap(cam.x - e.x), dz = wrap(cam.z - e.z);
+  var d  = Math.sqrt(dx*dx + dz*dz);
+  var want = Math.atan2(dx, dz);
+
+  if (e.kind === "missile"){
+    var da = want - e.a;
+    while (da >  Math.PI) da -= Math.PI*2;
+    while (da < -Math.PI) da += Math.PI*2;
+    e.a += Math.max(-1.1*dt, Math.min(1.1*dt, da));
+    e.x += Math.sin(e.a)*e.spd*dt;
+    e.z += Math.cos(e.a)*e.spd*dt;
+    if (hitsObstacle(e.x, e.z, 1.0) && e.y < 4){ boom(e.x, e.y, e.z, 0); S.enemy=null; S.spawnT=1.5; return; }
+    if (d < 3.2){ killPlayer(); S.enemy=null; S.spawnT=2.5; }
+    return;
+  }
+
+  // tanks: turn toward player, close in, keep an aggressive standoff
+  var da2 = want - e.a;
+  while (da2 >  Math.PI) da2 -= Math.PI*2;
+  while (da2 < -Math.PI) da2 += Math.PI*2;
+  var steer = Math.max(-e.turn*dt, Math.min(e.turn*dt, da2));
+  e.a += steer;
+
+  var drive = 0;
+  if (d > 20) drive = e.spd;
+  else if (d < 12) drive = -e.spd*0.5;
+  else drive = e.spd*0.25;
+
+  var nx = e.x + Math.sin(e.a)*drive*dt;
+  var nz = e.z + Math.cos(e.a)*drive*dt;
+  if (!hitsObstacle(nx, nz, 3)){ e.x = nx; e.z = nz; }
+  else e.a += 1.2*dt;   // nudge around the block
+
+  e.fire -= dt;
+  if (e.fire <= 0 && Math.abs(da2) < e.acc && d < 110){
+    e.fire = (e.kind==="super" ? 1.6 : 2.6) + Math.random()*1.2;
+    S.eshots.push({ x:e.x + Math.sin(e.a)*3, y:2.15, z:e.z + Math.cos(e.a)*3,
+                    a:e.a, spd:40, t:5 });
+    sfx.efire();
+  }
+}
+function updateSaucer(dt){
+  if (!S.saucer){
+    if (Math.random() < 0.05*dt) {
+      var ang = cam.a + (Math.random()-0.5)*1.6;
+      S.saucer = { x: cam.x + Math.sin(ang)*90, y:3.6, z: cam.z + Math.cos(ang)*90,
+                   a: ang + Math.PI/2 + (Math.random()-0.5), t:22 };
+      sfx.saucer();
+    }
+    return;
+  }
+  var s = S.saucer;
+  s.x += Math.sin(s.a)*11*dt;
+  s.z += Math.cos(s.a)*11*dt;
+  s.y = 3.6 + Math.sin(performance.now()/700)*0.7;
+  s.t -= dt;
+  if (s.t <= 0) S.saucer = null;
+}
+
+/* ---------- shots / explosions ---------- */
+function fire(){
+  if (S.cool > 0 || S.dead > 0) return;
+  if (S.shots.length >= 4) return;      // four shells in the air at once, max
+  S.cool = 0.22;
+  S.shots.push({ x:cam.x, y:1.5, z:cam.z, a:cam.a, spd:95, t:1.7 });
+  sfx.fire();
+}
+function boom(x,y,z,big){
+  var shards = [];
+  for (var i=0;i<26;i++){
+    var t = Math.random()*Math.PI*2, p = (Math.random()-0.5)*1.4;
+    shards.push({ dx:Math.cos(t)*Math.cos(p), dy:Math.sin(p)+0.25, dz:Math.sin(t)*Math.cos(p),
+                  s: 6 + Math.random()*14 });
+  }
+  S.booms.push({ x:x, y:y, z:z, t:0, life: big?1.4:1.0, sh:shards });
+  sfx.boom();
+  S.shake = big ? 12 : 7;
+}
+function updateShots(dt){
+  var i, s;
+  for (i=S.shots.length-1;i>=0;i--){
+    s = S.shots[i];
+    s.x += Math.sin(s.a)*s.spd*dt;
+    s.z += Math.cos(s.a)*s.spd*dt;
+    s.t -= dt;
+    var gone = s.t <= 0;
+
+    if (!gone && hitsObstacle(s.x, s.z, 0.4) && s.y < 6){ boom(s.x,s.y,s.z,0); gone = true; }
+
+    if (!gone && S.enemy){
+      var e = S.enemy;
+      var dx = wrap(e.x - s.x), dz = wrap(e.z - s.z), dy = (e.y+1.2) - s.y;
+      if (dx*dx + dz*dz + dy*dy < 12){
+        boom(e.x, e.y+1, e.z, 1);
+        addScore(e.pts);
+        S.enemy = null; S.kills++; S.spawnT = 1.4 + Math.random();
+        gone = true;
+      }
+    }
+    if (!gone && S.saucer){
+      var q = S.saucer;
+      var qx = wrap(q.x - s.x), qz = wrap(q.z - s.z), qy = q.y - s.y;
+      if (qx*qx + qz*qz < 20 && Math.abs(qy) < 3.2){
+        boom(q.x, q.y, q.z, 1);
+        addScore(5000);
+        S.saucer = null; gone = true;
+      }
+    }
+    if (gone) S.shots.splice(i,1);
+  }
+
+  for (i=S.eshots.length-1;i>=0;i--){
+    s = S.eshots[i];
+    s.x += Math.sin(s.a)*s.spd*dt;
+    s.z += Math.cos(s.a)*s.spd*dt;
+    s.t -= dt;
+    var kill = s.t <= 0;
+    if (!kill && hitsObstacle(s.x, s.z, 0.4)){ boom(s.x, s.y, s.z, 0); kill = true; }
+    if (!kill && dist2(s.x, s.z) < 6 && S.dead <= 0 && S.invuln <= 0){
+      killPlayer(); kill = true;
+    }
+    if (kill) S.eshots.splice(i,1);
+  }
+
+  for (i=S.booms.length-1;i>=0;i--){
+    S.booms[i].t += dt;
+    if (S.booms[i].t > S.booms[i].life) S.booms.splice(i,1);
+  }
+}
+function addScore(p){
+  S.score += p;
+  if (S.score >= S.next){ S.lives++; S.next += 15000; sfx.bonus(); }
+  if (S.score > high) high = S.score;
+}
+function killPlayer(){
+  S.dead = 2.6;
+  S.lives--;
+  S.shake = 20;
+  sfx.boom();
+  // cracked screen
+  var cx = CX + (Math.random()-0.5)*220, cy = CY + (Math.random()-0.5)*140;
+  var lines = [];
+  for (var i=0;i<11;i++){
+    var a = Math.random()*Math.PI*2, x = cx, y = cy, path = [[x,y]];
+    for (var j=0;j<5;j++){
+      a += (Math.random()-0.5)*0.9;
+      var len = 30 + Math.random()*70;
+      x += Math.cos(a)*len; y += Math.sin(a)*len;
+      path.push([x,y]);
+    }
+    lines.push(path);
+  }
+  S.cracks = lines;
+}
+
+/* ---------- input ---------- */
+var keys = {};
+window.addEventListener("keydown", function(ev){
+  if ([32,37,38,39,40].indexOf(ev.keyCode) >= 0) ev.preventDefault();
+  keys[ev.code] = true;
+  sfx.unlock();
+  if (ev.code === "Space"){
+    if (mode === "attract"){ resetGame(); mode = "play"; }
+    else if (mode === "over"){ resetGame(); mode = "play"; }
+    else if (!paused) fire();
+  }
+  if (ev.code === "KeyP" && mode === "play") paused = !paused;
+});
+window.addEventListener("keyup", function(ev){ keys[ev.code] = false; });
+
+function down(){
+  for (var i=0;i<arguments.length;i++) if (keys[arguments[i]]) return true;
+  return false;
+}
+
+/* ---------- player ---------- */
+function updatePlayer(dt){
+  if (S.dead > 0){
+    S.dead -= dt;
+    if (S.dead <= 0){
+      S.cracks = null;
+      if (S.lives <= 0){ mode = "over"; }
+      else { S.invuln = 1.5; S.enemy = null; S.eshots = []; S.spawnT = 2.0; }
+    }
+    return;
+  }
+  if (S.invuln > 0) S.invuln -= dt;
+  if (S.cool > 0) S.cool -= dt;
+
+  var turn = 0, move = 0;
+  if (down("ArrowLeft","KeyA"))  turn -= 1;
+  if (down("ArrowRight","KeyD")) turn += 1;
+  if (down("ArrowUp","KeyW"))    move += 1;
+  if (down("ArrowDown","KeyS"))  move -= 1;
+
+  cam.a += turn * 1.45 * dt;
+
+  var spd = move > 0 ? 15 : 8;
+  var nx = cam.x + Math.sin(cam.a)*move*spd*dt;
+  var nz = cam.z + Math.cos(cam.a)*move*spd*dt;
+  if (!hitsObstacle(nx, nz, 2.4)){ cam.x = nx; cam.z = nz; }
+
+  if (keys["Space"]) fire();     // hold the trigger to keep firing
+
+  sfx.engine(Math.abs(move), Math.abs(turn));
+}
+
+/* ---------- render ---------- */
+function render(){
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0,0,W,H);
+
+  ctx.save();
+  if (S.shake > 0){
+    ctx.translate((Math.random()-0.5)*S.shake, (Math.random()-0.5)*S.shake);
+    S.shake *= 0.86;
+    if (S.shake < 0.4) S.shake = 0;
+  }
+
+  drawHorizon();
+
+  ctx.strokeStyle = GREEN;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+
+  // obstacles
+  for (var i=0;i<obstacles.length;i++){
+    var o = obstacles[i];
+    if (dist2(o.x, o.z) > VIEW*VIEW) continue;
+    drawModel(o.m, o.x, 0, o.z, o.rot);
+  }
+  // shots
+  for (i=0;i<S.shots.length;i++)
+    drawModel(M_SHELL, S.shots[i].x, S.shots[i].y, S.shots[i].z, 0, 1);
+  ctx.stroke();
+
+  // enemies get their own heavier pass so they pop out of the scenery
+  ctx.lineWidth = 3.5;
+  ctx.beginPath();
+  if (S.enemy){
+    var e = S.enemy;
+    if (e.kind === "missile")      drawModel(M_MISSILE, e.x, e.y, e.z, e.a, 1);
+    else if (e.kind === "super")   drawModel(M_TANK, e.x, 0, e.z, e.a, 1.25);
+    else                           drawModel(M_TANK, e.x, 0, e.z, e.a, 1);
+  }
+  if (S.saucer) drawModel(M_SAUCER, S.saucer.x, S.saucer.y, S.saucer.z, S.saucer.a, 1);
+  ctx.stroke();
+
+  // explosions
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (i=0;i<S.booms.length;i++){
+    var b = S.booms[i], k = b.t / b.life;
+    for (var j=0;j<b.sh.length;j++){
+      var sh = b.sh[j], r = k * sh.s;
+      var p1 = toCam(b.x + sh.dx*r,       b.y + sh.dy*r,       b.z + sh.dz*r);
+      var p2 = toCam(b.x + sh.dx*r*1.22,  b.y + sh.dy*r*1.22,  b.z + sh.dz*r*1.22);
+      line3(p1, p2);
+    }
+  }
+  ctx.stroke();
+
+  drawEnemyShells();
+  ctx.restore();
+
+  if (S.cracks) drawCracks();
+  drawHUD();
+  drawSight();
+}
+
+/* Incoming shells are drawn in screen space, in RED, with a minimum pixel size -
+   red is the one thing in this world that is not green, so it cannot hide in the scenery. */
+function drawEnemyShells(){
+  var t = performance.now();
+  for (var i=0;i<S.eshots.length;i++){
+    var s = S.eshots[i];
+    var p = toCam(s.x, s.y, s.z);
+    if (p.z < NEARZ) continue;
+    var sc = proj(p);
+    var r = Math.max(10, Math.min(190, FOCAL * 0.5 / p.z));
+
+    // solid core
+    ctx.fillStyle = RED;
+    ctx.beginPath();
+    ctx.moveTo(sc.x, sc.y - r); ctx.lineTo(sc.x + r, sc.y);
+    ctx.lineTo(sc.x, sc.y + r); ctx.lineTo(sc.x - r, sc.y);
+    ctx.closePath(); ctx.fill();
+
+    // hard pulsing ring
+    var q = r * (1.9 + 0.6*Math.sin(t/50));
+    ctx.strokeStyle = RED; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(sc.x, sc.y - q); ctx.lineTo(sc.x + q, sc.y);
+    ctx.lineTo(sc.x, sc.y + q); ctx.lineTo(sc.x - q, sc.y);
+    ctx.closePath(); ctx.stroke();
+    ctx.lineWidth = 2;
+  }
+}
+
+function drawCracks(){
+  ctx.strokeStyle = GREEN;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var i=0;i<S.cracks.length;i++){
+    var p = S.cracks[i];
+    ctx.moveTo(p[0][0], p[0][1]);
+    for (var j=1;j<p.length;j++) ctx.lineTo(p[j][0], p[j][1]);
+  }
+  ctx.stroke();
+}
+
+function drawSight(){
+  if (S.dead > 0) return;
+
+  // crosshair dims while the gun reloads, so you can read the cadence
+  ctx.strokeStyle = (S.cool > 0) ? DIM : GREEN;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(CX-70, CY+40); ctx.lineTo(CX-16, CY+40);
+  ctx.moveTo(CX+16, CY+40); ctx.lineTo(CX+70, CY+40);
+  ctx.moveTo(CX, CY+40-26); ctx.lineTo(CX, CY+40-8);
+  ctx.moveTo(CX, CY+40+8);  ctx.lineTo(CX, CY+40+26);
+  ctx.moveTo(CX-70, CY+30); ctx.lineTo(CX-70, CY+50);
+  ctx.moveTo(CX+70, CY+30); ctx.lineTo(CX+70, CY+50);
+  ctx.stroke();
+
+  // periscope frame
+  ctx.strokeStyle = GREEN;
+  ctx.beginPath();
+  var L = 90, R = W-90;
+  ctx.moveTo(L, 150); ctx.lineTo(L, H-40);
+  ctx.moveTo(R, 150); ctx.lineTo(R, H-40);
+  ctx.moveTo(L, 150); ctx.lineTo(L+40, 150);
+  ctx.moveTo(R, 150); ctx.lineTo(R-40, 150);
+  ctx.moveTo(L, H-40); ctx.lineTo(L+40, H-40);
+  ctx.moveTo(R, H-40); ctx.lineTo(R-40, H-40);
+  ctx.stroke();
+}
+
+var sweep = 0;
+function drawHUD(){
+  var rx = CX, ry = 80, rr = 58;
+
+  // radar scope
+  ctx.strokeStyle = RED;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(rx, ry, rr, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(rx, ry); ctx.lineTo(rx - rr*Math.sin(0.62), ry - rr*Math.cos(0.62));
+  ctx.moveTo(rx, ry); ctx.lineTo(rx + rr*Math.sin(0.62), ry - rr*Math.cos(0.62));
+  ctx.stroke();
+
+  // sweep line
+  ctx.strokeStyle = "#a01f18";
+  ctx.beginPath();
+  ctx.moveTo(rx, ry);
+  ctx.lineTo(rx + Math.sin(sweep)*rr, ry - Math.cos(sweep)*rr);
+  ctx.stroke();
+
+  // blips - always visible, brightest as the sweep passes over them
+  function blip(x,z,size,col,hot){
+    var dx = wrap(x - cam.x), dz = wrap(z - cam.z);
+    var d = Math.sqrt(dx*dx + dz*dz);
+    if (d > 150) return;
+    var ang = Math.atan2(dx, dz) - cam.a;
+    var da = ang - sweep;
+    while (da >  Math.PI) da -= Math.PI*2;
+    while (da < -Math.PI) da += Math.PI*2;
+    var fresh = (da <= 0 && da > -1.2);      // sweep just went by
+    var k = d/150*rr;
+    var bx = rx + Math.sin(ang)*k, by = ry - Math.cos(ang)*k;
+    var s2 = fresh ? size*1.6 : size;
+    ctx.fillStyle = fresh ? hot : col;
+    ctx.fillRect(bx - s2/2, by - s2/2, s2, s2);
+  }
+  if (S.enemy){
+    if (S.enemy.kind === "missile") blip(S.enemy.x, S.enemy.z, 5, "#ffc233", "#ffe9a0");
+    else                            blip(S.enemy.x, S.enemy.z, 7, RED, "#ff8880");
+  }
+  if (S.saucer) blip(S.saucer.x, S.saucer.z, 5, "#4fd8ff", "#c8f2ff");
+
+  // incoming shells always paint on the radar, sweep or no sweep
+  var near = 0;
+  for (var k=0;k<S.eshots.length;k++){
+    var sh = S.eshots[k];
+    var dx = wrap(sh.x - cam.x), dz = wrap(sh.z - cam.z);
+    var d = Math.sqrt(dx*dx + dz*dz);
+    if (d > 150) continue;
+    if (d < 45) near = 1;
+    var ang = Math.atan2(dx, dz) - cam.a;
+    var kk = d/150*rr;
+    ctx.fillStyle = "#ff8880";
+    ctx.fillRect(rx + Math.sin(ang)*kk - 2, ry - Math.cos(ang)*kk - 2, 4, 4);
+  }
+  if (near && Math.floor(performance.now()/120) % 2 === 0){
+    ctx.fillStyle = RED;
+    ctx.font = "bold 18px 'Courier New',monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("INCOMING", rx, ry + rr + 26);
+    ctx.textAlign = "left";
+  }
+
+  // YOU - green chevron at the center, always pointing up the scope
+  ctx.fillStyle = GREEN;
+  ctx.beginPath();
+  ctx.moveTo(rx, ry - 8);
+  ctx.lineTo(rx + 6, ry + 6);
+  ctx.lineTo(rx, ry + 2);
+  ctx.lineTo(rx - 6, ry + 6);
+  ctx.closePath();
+  ctx.fill();
+
+  // score / lives
+  ctx.fillStyle = RED;
+  ctx.font = "bold 22px 'Courier New',monospace";
+  ctx.textAlign = "left";
+  ctx.fillText("SCORE " + S.score, 24, 40);
+  ctx.textAlign = "right";
+  ctx.fillText("HIGH " + high, W-24, 40);
+  ctx.textAlign = "left";
+  ctx.fillText("LIVES", 24, 70);
+  for (var i=0;i<Math.max(0,S.lives);i++){
+    var bx = 24 + i*22, by = 82;
+    ctx.fillRect(bx, by, 16, 6);
+    ctx.fillRect(bx+5, by-5, 6, 5);
+  }
+
+  if (paused && mode === "play"){
+    ctx.fillStyle = GREEN;
+    ctx.textAlign = "center";
+    ctx.font = "bold 34px 'Courier New',monospace";
+    ctx.fillText("PAUSED", CX, CY);
+  }
+  ctx.textAlign = "left";
+}
+
+/* Orthographic model viewer - independent of the game camera.
+   Used by the title screen so you can see every enemy up close. */
+function drawModel2D(m, px, py, scale, rot, tilt){
+  var s = Math.sin(rot), c = Math.cos(rot);
+  var st = Math.sin(tilt), ct = Math.cos(tilt);
+  var pts = [], i, v;
+  for (i=0;i<m.v.length;i++){
+    v = m.v[i];
+    var x = v[0]*c + v[2]*s;
+    var z = -v[0]*s + v[2]*c;
+    var y = v[1]*ct - z*st;
+    pts.push([px + x*scale, py - y*scale]);
+  }
+  ctx.beginPath();
+  for (i=0;i<m.e.length;i++){
+    var a = pts[m.e[i][0]], b = pts[m.e[i][1]];
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+  }
+  ctx.stroke();
+}
+
+var GALLERY = [
+  { m:M_TANK,    label:"TANK",       pts:"1000", sc:16, y:26, note:"TURNS SLOWLY. LEAD YOUR SHOT." },
+  { m:M_TANK,    label:"SUPER TANK", pts:"3000", sc:20, y:26, note:"FASTER. FIRES SOONER. KEEP MOVING." },
+  { m:M_MISSILE, label:"MISSILE",    pts:"2000", sc:20, y:8,  note:"HOMES IN. DUCK BEHIND A BLOCK." },
+  { m:M_SAUCER,  label:"SAUCER",     pts:"5000", sc:20, y:14, note:"HARMLESS. PURE BONUS." }
+];
+
+function drawOverlayText(){
+  ctx.textAlign = "center";
+  ctx.fillStyle = GREEN;
+  if (mode === "attract"){
+    ctx.font = "bold 52px 'Courier New',monospace";
+    ctx.fillText("BATTLEZONE", CX, 200);
+
+    // target identification panel
+    var g = GALLERY[Math.floor(performance.now()/3200) % GALLERY.length];
+    var t = performance.now()/1000;
+    var px = CX - 190, py = 230, pw = 380, ph = 210;
+
+    ctx.fillStyle = "#000";
+    ctx.fillRect(px, py, pw, ph);
+    ctx.strokeStyle = DIM; ctx.lineWidth = 2;
+    ctx.strokeRect(px, py, pw, ph);
+
+    ctx.strokeStyle = GREEN; ctx.lineWidth = 3;
+    drawModel2D(g.m, CX, py + 130, g.sc, t*0.8, 0.42);
+
+    ctx.fillStyle = GREEN;
+    ctx.font = "bold 20px 'Courier New',monospace";
+    ctx.fillText(g.label + "  " + g.pts, CX, py + 30);
+    ctx.fillStyle = DIM;
+    ctx.font = "14px 'Courier New',monospace";
+    ctx.fillText(g.note, CX, py + 192);
+
+    ctx.fillStyle = GREEN;
+    ctx.font = "bold 22px 'Courier New',monospace";
+    ctx.fillText("PRESS SPACE TO START", CX, 490);
+    ctx.fillStyle = DIM;
+    ctx.font = "16px 'Courier New',monospace";
+    ctx.fillText("BONUS TANK EVERY 15000", CX, 530);
+    ctx.lineWidth = 2;
+  } else if (mode === "over"){
+    ctx.font = "bold 48px 'Courier New',monospace";
+    ctx.fillText("GAME OVER", CX, CY - 30);
+    ctx.font = "bold 22px 'Courier New',monospace";
+    ctx.fillText("SCORE " + S.score, CX, CY + 20);
+    ctx.fillText("PRESS SPACE", CX, CY + 60);
+  }
+  ctx.textAlign = "left";
+}
+
+/* ---------- sound ---------- */
+var sfx = (function(){
+  var AC = null, eng = null, engGain = null, filt = null, ready = false;
+  function ac(){
+    if (!AC){
+      var C = window.AudioContext || window.webkitAudioContext;
+      if (!C) return null;
+      AC = new C();
+    }
+    return AC;
+  }
+  function tone(f1, f2, dur, type, vol){
+    var a = ac(); if (!a) return;
+    var o = a.createOscillator(), g = a.createGain();
+    o.type = type; o.frequency.setValueAtTime(f1, a.currentTime);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20,f2), a.currentTime + dur);
+    g.gain.setValueAtTime(vol, a.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(); o.stop(a.currentTime + dur);
+  }
+  function noise(dur, vol, cut){
+    var a = ac(); if (!a) return;
+    var len = Math.floor(a.sampleRate * dur);
+    var buf = a.createBuffer(1, len, a.sampleRate), d = buf.getChannelData(0);
+    for (var i=0;i<len;i++) d[i] = (Math.random()*2-1) * (1 - i/len);
+    var src = a.createBufferSource(); src.buffer = buf;
+    var f = a.createBiquadFilter(); f.type="lowpass"; f.frequency.value = cut;
+    var g = a.createGain(); g.gain.value = vol;
+    src.connect(f); f.connect(g); g.connect(a.destination);
+    src.start();
+  }
+  return {
+    unlock: function(){
+      var a = ac(); if (!a || ready) return;
+      if (a.state === "suspended") a.resume();
+      eng = a.createOscillator(); eng.type = "sawtooth"; eng.frequency.value = 42;
+      filt = a.createBiquadFilter(); filt.type = "lowpass"; filt.frequency.value = 180;
+      engGain = a.createGain(); engGain.gain.value = 0.03;
+      eng.connect(filt); filt.connect(engGain); engGain.connect(a.destination);
+      eng.start();
+      ready = true;
+    },
+    engine: function(mv, tn){
+      if (!ready) return;
+      var a = ac();
+      var target = 0.03 + mv*0.05 + tn*0.02;
+      engGain.gain.setTargetAtTime(target, a.currentTime, 0.08);
+      eng.frequency.setTargetAtTime(42 + mv*22 + tn*8, a.currentTime, 0.1);
+    },
+    fire:   function(){ tone(340, 60, 0.28, "square", 0.10); noise(0.12, 0.08, 900); },
+    efire:  function(){ tone(190, 45, 0.32, "sawtooth", 0.07); },
+    boom:   function(){ noise(0.7, 0.35, 480); tone(90, 30, 0.6, "sawtooth", 0.10); },
+    rise:   function(){ tone(120, 700, 1.2, "triangle", 0.05); },
+    saucer: function(){ tone(700, 900, 0.5, "sine", 0.04); },
+    bonus:  function(){ tone(500, 1200, 0.4, "square", 0.08); }
+  };
+})();
+
+/* ---------- main loop ---------- */
+var last = performance.now();
+resetGame();
+
+function frame(now){
+  var dt = Math.min(0.05, (now - last)/1000);
+  last = now;
+  sweep += dt * 2.2;
+  if (sweep > Math.PI*2) sweep -= Math.PI*2;
+
+  if (mode === "play" && !paused){
+    updatePlayer(dt);
+    updateEnemy(dt);
+    updateSaucer(dt);
+    updateShots(dt);
+  } else if (mode === "attract"){
+    cam.a += dt * 0.12;                 // slow attract-mode pan
+    for (var i=0;i<S.booms.length;i++) S.booms[i].t += dt;
+  }
+
+  render();
+  if (mode !== "play") drawOverlayText();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
